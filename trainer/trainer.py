@@ -120,7 +120,7 @@ class Trainer:
         print("\n========== TREINO TERMINADO ==========\n")
         print(f"Melhor modelo guardado em: {self.save_path}")
 
-        return history
+        return history, best_loss
 
     # --------------------------------------------------------------------
     # AVALIAÇÃO
