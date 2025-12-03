@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual env
+.venv/
+env/
+venv/
+
+# VSCode
+.vscode/
+
+# Dados locais
+data/*.csv
+data/*.parquet
+
+# Modelos
+storage/**/best_model.pth
+storage/**/TCN.pth
+storage/**/LSTM.pth
+storage/**/TRANSFORMER.pth
+storage/**/meta.json
+storage/**/rolling_predictions.csv
+
+# Imagens de relatórios
+reports/**/*.png
+
+# Checkpoints temporários
+checkpoints/
