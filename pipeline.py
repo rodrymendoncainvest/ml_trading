@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import torch
@@ -8,18 +9,17 @@ import torch
 # CONFIG
 # -----------------------------------------------------------
 from settings import Settings
-from core.normalizer import Normalizer
-from core.features import FeatureGenerator
-from core.window import WindowBuilder
+from core import Normalizer, FeatureGenerator, WindowBuilder
+from core.device import device
+from data.downloader import DataDownloader
+from data.raw_loader import RawLoader
 
-from models.factory import ModelFactory
+from models import ModelRegistry
+from trainer import Trainer
 
 from backtest.engine import BacktestEngine
 from backtest.metrics import BacktestMetrics
 from backtest.report import BacktestReport
-
-
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 # -----------------------------------------------------------
@@ -28,13 +28,14 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def load_raw(ticker):
     fpath = Path("data") / f"{ticker}_1H.csv"
-    if not fpath.exists():
-        raise FileNotFoundError(f"Ficheiro não encontrado: {fpath}")
+    fpath.parent.mkdir(parents=True, exist_ok=True)
 
-    df = pd.read_csv(fpath)
-    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-    df = df.sort_values("timestamp").reset_index(drop=True)
-    return df
+    if not fpath.exists():
+        print(f"Dados não encontrados em {fpath}, a descarregar via yfinance...")
+        DataDownloader().download(ticker=ticker, out=fpath)
+
+    loader = RawLoader()
+    return loader.load(fpath)
 
 
 # -----------------------------------------------------------
@@ -47,9 +48,13 @@ def preprocess(ticker, settings):
 
     raw = load_raw(ticker)
 
+    out = Path("storage") / ticker
+    out.mkdir(parents=True, exist_ok=True)
+
     # 1) Normalização OHLCV
-    norm = Normalizer(ticker=ticker)
-    df_norm = norm.fit_transform(raw)
+    norm = Normalizer(out / "scaler.joblib")
+    norm.fit(raw)
+    df_norm = norm.transform(raw)
 
     # 2) Feature engineering
     feat = FeatureGenerator().generate(df_norm)
@@ -64,9 +69,6 @@ def preprocess(ticker, settings):
     X, y = wb.build(feat)
 
     # guardar dataset
-    out = Path("storage") / ticker
-    out.mkdir(parents=True, exist_ok=True)
-
     np.save(out / "X.npy", X.astype(np.float32))
     np.save(out / "y.npy", y.astype(np.float32))
 
@@ -109,24 +111,27 @@ def train(ticker, settings):
     for model_name in settings.models:
         print(f"\n🔥 Treinar modelo: {model_name}")
 
-        model = ModelFactory.create(
+        model = ModelRegistry.create(
             name=model_name,
             input_dim=n_feat,
+            horizon=horizon,
             window=window,
-            horizon=horizon
-        ).to(DEVICE)
+        ).to(device)
 
-        best_loss = ModelFactory.train_model(
+        trainer = Trainer(
             model=model,
+            lr=settings.lr,
+            batch_size=settings.batch,
+            patience=settings.patience,
+            save_path=out / f"{model_name}.pth",
+        )
+
+        _, best_loss = trainer.fit(
             X_train=X_train,
             y_train=y_train,
             X_val=X_val,
             y_val=y_val,
-            device=DEVICE,
-            lr=settings.lr,
             epochs=settings.epochs,
-            patience=settings.patience,
-            save_path=out / f"{model_name}.pth"
         )
 
         results[model_name] = best_loss
@@ -156,7 +161,7 @@ def inference(ticker, settings):
     df_raw = load_raw(ticker)
 
     # normalize with existing scaler
-    norm = Normalizer(ticker=ticker)
+    norm = Normalizer(out / "scaler.joblib")
     df_norm = norm.transform(df_raw)
 
     # features
@@ -170,14 +175,14 @@ def inference(ticker, settings):
     )
 
     # load model
-    model = ModelFactory.create(
+    model = ModelRegistry.create(
         name=best,
         input_dim=meta["n_features"],
+        horizon=meta["horizon"],
         window=meta["window"],
-        horizon=meta["horizon"]
-    ).to(DEVICE)
+    ).to(device)
 
-    state = torch.load(out / "best_model.pth", map_location=DEVICE)
+    state = torch.load(out / "best_model.pth", map_location=device)
     model.load_state_dict(state)
     model.eval()
 
@@ -189,7 +194,7 @@ def inference(ticker, settings):
         window_df = feat.iloc[t - meta["window"] : t]
         window = wb.build_single(window_df)
 
-        w = torch.tensor(window, dtype=torch.float32).unsqueeze(0).to(DEVICE)
+        w = torch.tensor(window, dtype=torch.float32).unsqueeze(0).to(device)
 
         with torch.no_grad():
             pred_norm = model(w)[0].cpu().numpy()
@@ -223,7 +228,7 @@ def backtest(ticker, settings):
     df_pred["timestamp"] = pd.to_datetime(df_pred["timestamp"], utc=True)
 
     df = df_raw.merge(df_pred, on="timestamp", how="left")
-    df["prediction"] = df["prediction"].fillna(method="ffill").fillna(0)
+    df["prediction"] = df["prediction"].ffill().fillna(0)
 
     engine = BacktestEngine()
     results = engine.run(df)

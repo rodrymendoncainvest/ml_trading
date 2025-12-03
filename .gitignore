@@ -16,6 +16,10 @@ venv/
 data/*.csv
 data/*.parquet
 
+# Artefactos de execução
+storage/
+reports/
+
 # Modelos
 storage/**/best_model.pth
 storage/**/TCN.pth
